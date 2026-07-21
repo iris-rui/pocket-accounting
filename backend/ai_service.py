@@ -10,9 +10,9 @@ AI 服务模块
 import json
 import random
 import re
+import time as _time
 from datetime import date, datetime, timedelta
 from decimal import Decimal
-from typing import Optional
 
 import requests
 from config import settings
@@ -95,24 +95,25 @@ def _call_llm(messages: list[dict], temperature: float = 0.3, retries: int = 2) 
         except requests.exceptions.ConnectionError:
             last_error = RuntimeError("无法连接 AI 服务，请检查网络或 API 配置")
         except requests.exceptions.HTTPError as e:
-            status = e.response.status_code if e.response else "unknown"
-            if status == 401:
-                last_error = RuntimeError("AI API Key 无效，请检查配置")
-            elif status == 402:
-                last_error = RuntimeError("AI API 账户余额不足，请充值")
-            elif status == 429:
-                last_error = RuntimeError("AI API 调用频率过高，请稍后重试")
-            elif status >= 500:
-                # 服务端错误可重试
-                last_error = RuntimeError(f"AI 服务临时故障 (HTTP {status})")
+            if e.response is None:
+                last_error = RuntimeError("AI 服务返回错误 (无响应)")
             else:
-                last_error = RuntimeError(f"AI 服务返回错误 (HTTP {status})")
+                status: int = e.response.status_code
+                if status == 401:
+                    last_error = RuntimeError("AI API Key 无效，请检查配置")
+                elif status == 402:
+                    last_error = RuntimeError("AI API 账户余额不足，请充值")
+                elif status == 429:
+                    last_error = RuntimeError("AI API 调用频率过高，请稍后重试")
+                elif status >= 500:
+                    last_error = RuntimeError(f"AI 服务临时故障 (HTTP {status})")
+                else:
+                    last_error = RuntimeError(f"AI 服务返回错误 (HTTP {status})")
         except (KeyError, IndexError, json.JSONDecodeError):
             last_error = RuntimeError("AI 服务返回数据格式异常")
 
         # 仅对可重试的错误（超时、5xx）进行重试
         if attempt < retries and _is_retryable(last_error):
-            import time as _time
             _time.sleep(0.5 * (2 ** attempt))  # 0.5s → 1.0s
             continue
         break
@@ -423,7 +424,7 @@ def _resolve_date(text: str, today_str: str) -> str:
     return today_str
 
 
-def _extract_note(text: str, amount_str: str, account_name: str) -> str:
+def _extract_note(text: str, account_name: str) -> str:
     """
     从原文中提取有意义的备注，去掉金额数字和已知信息。
     """
@@ -689,7 +690,7 @@ def _local_fallback_parse(text: str, today: str) -> dict:
                 break
 
     # 提取有意义的备注
-    result["note"] = _extract_note(text, str(result["amount"]), result["account_name"])
+    result["note"] = _extract_note(text, result["account_name"])
 
     # 设置置信度：有金额+明确分类 → 高置信度；只有金额没有明确分类 → 低置信度
     if result["amount"] > 0 and category_matched:
