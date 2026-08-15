@@ -1,144 +1,78 @@
-# AI 协同开发日志 (AI_LOG.md)
+# AI 协同开发日志
 
-## 1. 工具链 (Toolchain)
+## 工具链
 
-### AI 工具
-| 工具 | 用途 |
-|------|------|
-| **Claude Code (claude-opus-4-8)** | 主力开发助手：代码生成、架构设计、Bug 排查、文档撰写 |
-| **Claude Code Agent** | 项目结构探索、需求分析 |
+- Claude Code
+- 前端：Vue 3
+- 后端：FastAPI
+- 数据库：MySQL 8
 
-### 前端/后端框架
-| 层级 | 选型 | 理由 |
-|------|------|------|
-| 前端 | Vue 3 + Vite + Chart.js | 响应式组件化开发，Vite 构建速度快，Chart.js 成熟稳定 |
-| 后端 | FastAPI + SQLAlchemy + PyMySQL | FastAPI 高性能、自动生成 API 文档；SQLAlchemy ORM 防注入 |
-| 数据库 | MySQL | 持久化存储，支持 DECIMAL 精确数值类型 |
-| AI | DeepSeek API (可配置) | 国产大模型，兼容 OpenAI 接口格式，中文理解能力强 |
+## 核心 Prompt
 
----
+### 1. 一句话记账解析
 
-## 2. 核心 Prompt 展示
+最初版本的问题是本地的兜底大模型会将不确定的随机归档到一个分类：用户说"转了500"，它能给分到"人情"；"还款2000"也能脑补出一个分类。所以最终版的思路是重写分类并将所有不确定归为其他，同时把分类和账户的取值封死成固定列表，不给它自由发挥的空间，同时怎加编辑确保人工兜底复验，同时让kimi模拟了四百条用例进行测试再矫正确保覆盖较大范围：
 
-### Prompt 1：AI 一句话记账的 System Prompt
+### 归为"其他"的情况（非常重要）：
+- 只说了金额但未说明用途 → 其他支出/其他收入
+- 内容模糊无法判断分类（如"转账""还款""打钱"） → 其他支出
+- 宁缺毋滥：不确定时归类为"其他"比猜错更好
 
-这是本项目最核心的 AI Prompt，用于让 LLM 从自然语言中精确提取记账信息。
+## 置信度校准
+- 金额+分类+账户+日期全部明确 → 0.85~0.95
+- 有金额但分类不确定（归为"其他"） → 0.30~0.45
+- 永远不给 1.0（保留判断余地）
 
-```
-你是一个记账助手，专门从用户的中文自然语言中提取记账信息。
-
-请分析用户输入，提取以下字段并以 JSON 格式返回（只返回 JSON，不要其他内容）：
-{
-  "type": "expense 或 income",
-  "amount": 数字金额（元，保留两位小数），
-  "category_name": "分类名称，必须从以下列表中选择最匹配的：餐饮、购物...",
-  "account_name": "账户名称，从以下选择：微信、支付宝、现金...",
-  "transaction_date": "日期 YYYY-MM-DD",
-  "note": "简短的备注说明",
-  "confidence": 0.0到1.0之间的置信度
-}
-
-规则：
-1. 金额可能是 "50块"、"100元"、"七十"、"50.5" 等形式。
-2. 分类通过语义推断：吃饭/外卖/食堂→餐饮；打车/地铁→交通...
-3. 账户通过关键词推断：微信/微信支付→微信；支付宝→支付宝...
-4. 如果无法判断类型，根据语境：花钱→expense，发工资→income。
-5. confidence 表示解析可信度，信息越完整越接近 1.0。
+## 反面示例
+❌ "转了500给朋友" → 归"其他支出"
+❌ "还款2000" → 归"其他支出"，不猜测具体类型
 ```
 
-**成功原因**：
-- 明确定义了 JSON Schema 约束输出格式
-- 提供了充足的规则示例，覆盖各种口语表达
-- 加入了 confidence 字段让用户知道可信度
-- 限制了分类和账户的取值空间，避免幻觉
+真正起效的就两点：一是"宁缺毋滥"写在了显眼位置，二是给了反面示例。只写正面规则没用，AI 照样过度联想，把错误答案的样例摆到它面前才老实。confidence 字段也不是摆设——前端拿它来提示"这条可能不准，请确认"，避免瞎猜的结果直接落库。调用侧还有两个配合手段：user message 里带上当前日期（不然"昨天"没法算），temperature 压到 0.1 减少发挥。
 
-### Prompt 2：AI 财务毒舌顾问
+### 2. 毒舌财务顾问
 
-```
-你是一个风格犀利的个人财务顾问，名叫"小袋"。你的任务是根据用户的月度消费数据，
-给出一针见血的财务点评和建议。
+第一版过于单调永远只有一种："建议您合理规划消费哦"。最终版里写了 5 个场景（超支、月光、存了一点、存了很多、数据太少）的示例文案。
 
-要求：
-1. 先用一句话总结本月消费概况。
-2. 指出消费中最大的问题或亮点。
-3. 给出一条具体的改进建议。
-4. 风格：默认"毒舌但有理有据"，让用户意识到问题但不会真的冒犯。
-   如果用户当月消费控制得很好，则切换为"温馨表扬"风格。
+给了示例之后输出质量直接上了一个台阶。经验就是："犀利""幽默"这种词对 LLM 来说太抽象，示例才是它真正能模仿的东西。另外调用时会把真实的月度收支、分类占比、预算执行情况拼进 user message，毒舌要"有理有据"全靠这些数据撑着。这个接口 temperature 给的是 0.7，和解析接口相反——吐槽需要发挥空间。
 
-输出 JSON 格式（只返回 JSON）：
-{
-  "advice": "完整财务点评（2-4句话）",
-  "style": "毒舌 或 温馨",
-  "spending_summary": "一句话消费总结"
-}
+## Debug 经历：统计接口的金额长出浮点尾巴
+
+开发中遇到的bug。
+
+**现象。** 联调阶段发现仪表盘的月度支出偶尔会显示 50.00000000000001 这种带尾巴的数字。
+
+**排查。** 定位到 crud.py 的统计查询，临时加了行打印：
+
+```python
+total = expense_q.with_entities(func.sum(Transaction.amount)).scalar()
+print(type(total), total)   # <class 'float'> 208.98000000000002
 ```
 
-**成功原因**：
-- 设定了明确的角色和风格约束
-- "毒舌但有理有据"的定位精准——既有趣又不冒犯
-- 输入中提供了结构化的消费数据，让 LLM 有据可依
-- 输出要求 JSON 格式，便于前端展示
+数据库里 amount 列明明是 DECIMAL(12,2)，求和结果到了 Python 里却成了 float，精度就是在这一步丢的。
+把现象描述给 Claude Code："MySQL DECIMAL 列，SQLAlchemy func.sum() 之后 scalar() 拿到的是 float"。它给出的解释是：func.sum() 的返回类型推断不靠谱，不能指望它原样返回 Decimal；稳妥做法是 SQL 层用 coalesce 兜住 NULL，Python 层统一显式转成 Decimal：
 
----
+```python
+# 修复后
+raw = expense_q.with_entities(func.coalesce(func.sum(Transaction.amount), 0)).scalar()
+total_expense = Decimal(str(raw))
+```
 
-## 3. Debug 经历
+现在 crud.py 里所有聚合查询都是这个写法，并且统一走 `_to_decimal()` 过一道。
 
-### Bug：Decimal 与 float 隐式转换导致精度丢失
+**验证。** 往库里塞了 0.1、0.2、0.3 三笔交易，统计接口返回 0.60，尾巴消失，前端图表也正常了。
 
-**现象**：
-在统计接口中，金额偶尔出现 `50.00000000000001` 这样的浮点数尾数。
+**教训。** 跟钱有关的计算，float 在从数据库到前端的任何一环混进来都会出事。这个项目从建表（DECIMAL(12,2)）到 Python（Decimal）本来就防着这手，聚合查询这一处忘了考虑。
 
-**排查过程**：
+## 开发过程
 
-1. **看日志**：先用 Python print 打印 `func.sum(Transaction.amount)` 的返回值类型，发现是 `float` 而非 `Decimal`。
+大致顺序：
 
-2. **查源码**：定位到 `crud.py` 中的统计查询：
-   ```python
-   # ❌ 问题代码
-   total_income = income_q.with_entities(func.sum(Transaction.amount)).scalar()
-   ```
+1. 读考核要求，把"一句话记账""毒舌看板""浮点精度"几个进阶点标成重点
+2. 定架构和表结构（accounts / categories / transactions / budgets 四张表）
+3. 后端按 模型 → CRUD → AI 服务 → 路由 的顺序写
+4. 前端 Vue 3 组件化（仪表盘 / 记账页 / 预算 / AI 看板）
+5. 造种子数据、跑边界测试（解析测试结果留在 ai_test_result.json）
+6. 写 README 和这份日志
 
-3. **根因分析**：MySQL 的 `SUM(DECIMAL)` 返回的是 `DECIMAL`，但 SQLAlchemy 在某些情况下会将其转换为 Python `float`，导致精度丢失。
-
-4. **AI 辅助排查**：向 Claude Code 描述了"sum 返回的金额有浮点数尾数"的现象，Claude 指出问题是 SQLAlchemy 的 `func.sum()` 对 DECIMAL 列的返回类型处理不一致，建议用 `func.coalesce(func.sum(...), 0)` 确保类型，并在 Python 端手动转为 Decimal。
-
-5. **修复方案**：
-   ```python
-   # ✅ 修复后
-   raw = income_q.with_entities(func.coalesce(func.sum(Transaction.amount), 0)).scalar()
-   total_income = Decimal(str(raw))
-   ```
-
-6. **验证**：修复后创建了多条金额为 `0.1`、`0.2`、`0.3` 的交易记录，统计求和结果精确为 `0.60`，浮点尾数消失。
-
-**教训**：
-- 涉及货币的场景，Python 侧必须显式使用 `Decimal`，不能用 `float`
-- SQLAlchemy 的类型转换不是完全透明的，对 DECIMAL 列需要额外注意
-- "浮点数精度灾难"正是考核指南中提到的踩坑点，这个 Bug 的解决印证了项目对精度问题的重视
-
----
-
-## 4. 开发过程记录
-
-### 整体流程
-
-1. **需求分析** ：阅读《选拔考核指南》PDF，提取选题二的全部需求
-2. **架构设计** ：确定 Vue 3 + FastAPI + MySQL 三层架构，设计数据库 ER 模型
-3. **后端开发** ：模型 → Schema → CRUD → AI 服务 → 路由，逐层实现
-4. **前端开发** ：从纯 HTML 重构为 Vue 3 SFC 组件化架构
-5. **集成测试** ：MySQL 建库、种子数据、API 端到端测试、前端 build 验证
-6. **文档撰写** ：README + AI_LOG
-
-### AI 协同模式
-
-- **代码生成**：核心业务逻辑（CRUD、AI 解析）由 Claude Code 按设计规范生成
-- **代码审查**：生成后逐一检查 Decimal 精度、SQL 安全、异常处理
-- **Bug 修复**：上述 Decimal 精度问题通过 AI 辅助排查 + 人工验证解决
-- **重构**：前端从原生 HTML 重构为 Vue 3 组件化架构时，AI 批量迁移代码
-
-### 关键决策
-
-- **Decimal 而非 Float**：响应考核指南中"浮点数精度灾难"的踩坑点要求
-- **Vue 3 Composition API**：更灵活的逻辑复用，配合 `<script setup>` 语法糖
-- **AI 降级策略**：AI API 不可用时自动切换本地规则解析，确保核心功能不中断
-- **Chart.js CDN 转 npm**：从 CDN 引入改为 npm 包，配合 Vite tree-shaking 减小打包体积
+AI 在其中的角色：大部分代码的初稿是它写的，但每一版我都自己跑过、改过。git 历史里有个挺典型的例子：那次「fix: ai_service.py 类型错误与代码规范修复」的提交，就是让 AI 自查 ai_service.py 时发现的类型错误——`_call_llm` 里 e.response 为 None 时 status 是字符串 "unknown"，下一行 `status >= 500` 会直接抛 TypeError，兜底逻辑自己先崩了。AI 写的代码让 AI 自己 review 一遍，确实能捞出东西来。
