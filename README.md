@@ -62,7 +62,7 @@ CREATE DATABASE IF NOT EXISTS pocket_accounting
 - Host: `localhost`
 - Port: `3306`
 - User: `root`
-- Password: `__DB_PASSWORD_REMOVED__`
+- Password: `XXXX`
 - Database: `pocket_accounting`
 
 ### 3. 后端启动
